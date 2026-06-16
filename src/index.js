@@ -24,10 +24,10 @@ export default {
       const res = await fetch(UPSTREAM_URL, {
         method: "GET",
         headers: {
-          Accept: "*/*",
+          "Accept": "*/*",
           "Accept-Language": "zh-Hans-CN;q=1, zh-Hant-CN;q=0.9, en-CN;q=0.8, ja-CN;q=0.7",
-          Authorization: `Bearer ${env.MONOPROXY_TOKEN}`,
-          "User-Agent": "MonoProxy/1.3.3 (iPhone; iOS 18.7.2; Scale/3.00)",
+          "Authorization": `Bearer ${env.MONOPROXY_TOKEN}`,
+          "User-Agent": `${env.MONOPROXY_USER_AGENT}`,
         },
       });
       if (!res.ok) {
