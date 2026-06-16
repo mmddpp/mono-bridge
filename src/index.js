@@ -35,7 +35,7 @@ export default {
       }
 
       const json = await res.json();
-      const yaml = convert(json);
+      const yaml = convert(json, env);
 
       return new Response(yaml, {
         headers: {
@@ -79,7 +79,29 @@ function validateEnv(env) {
   }
 }
 
-function convert(services) {
+function parseRules(rulesSrc) {
+  if (!rulesSrc) return [];
+
+  // 1. 如果已经是数组，直接返回（最理想的状况）
+  if (Array.isArray(rulesSrc)) {
+    return rulesSrc;
+  }
+
+  // 2. 如果是未解析的 YAML 纯文本字符串，将其解析为数组
+  if (typeof rulesSrc === 'string' && rulesSrc.trim()) {
+    try {
+      const parsed = parse(rulesSrc);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+      console.error("parseRules 解析 YAML 字符串失败:", e);
+      return [];
+    }
+  }
+
+  return [];
+}
+
+function convert(services, env) {
   // 1. 过滤并解析服务器节点
   const servers = services
     .flatMap((service) => service.servers || []) // 防空处理，对齐 Python 的 .get("servers", [])
@@ -108,9 +130,14 @@ function convert(services) {
     { name: "StreamingSE", type: "select", proxies: ["DIRECT", ...names] }, // 使用 ... 对齐 Python 的 * 展开
   ];
 
-  // 4. 统一输出结构
-  return stringify({
-    proxies: servers,
-    "proxy-groups": groups
+  // 4. 获取并解析 rules 环境变量
+  const rawRules = env?.RULES || (typeof env !== 'undefined' ? env.RULES : '');
+  const rules = parseRules(rawRules);
+
+  // 5. 统一输出结构
+  return stringify({ 
+    proxies: servers, 
+    "proxy-groups": groups,
+    rules: rules 
   });
 }
