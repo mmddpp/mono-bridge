@@ -27,7 +27,7 @@ export default {
           "Accept": "*/*",
           "Accept-Language": "zh-Hans-CN;q=1, zh-Hant-CN;q=0.9, en-CN;q=0.8, ja-CN;q=0.7",
           "Authorization": `Bearer ${env.MONOPROXY_TOKEN}`,
-          "User-Agent": `${env.MONOPROXY_USER_AGENT}`,
+          "User-Agent": "MonoProxy/1.3.3 (iPhone; iOS 18.7.2; Scale/3.00)",
         },
       });
       if (!res.ok) {
@@ -80,18 +80,37 @@ function validateEnv(env) {
 }
 
 function convert(services) {
+  // 1. 过滤并解析服务器节点
   const servers = services
-    .flatMap((service) => service.servers)
+    .flatMap((service) => service.servers || []) // 防空处理，对齐 Python 的 .get("servers", [])
     .filter((server) => server.enable === 1 && server.hide !== 1)
     .map((server) => ({
-      name: `${server.emoji} ${server.alias} (MP)`,
+      // 去除 (MP)，对齐 Python 的字符串拼接
+      name: `${server.emoji || ''} ${server.alias || ''}`,
       server: server.hostname,
-      port: Number(server.server_port ?? server.port),
+      // 使用 || 对齐 Python 的 or 逻辑（处理 falsy 值），并提供 0 作为兜底
+      port: Number(server.server_port || server.port || 0),
       type: "ss",
       cipher: server.encryption,
       password: server.password,
       udp: true,
     }));
 
-  return stringify({ proxies: servers });
+  // 2. 提取所有节点名称
+  const names = servers.map((s) => s.name);
+
+  // 3. 构建策略组 (proxy-groups)
+  const groups = [
+    { name: "Proxy", type: "select", proxies: names },
+    { name: "MATCH", type: "select", proxies: ["Proxy", "DIRECT"] },
+    { name: "AI", type: "select", proxies: ["Proxy"] },
+    { name: "Streaming", type: "select", proxies: ["Proxy", ...names] },   // 使用 ... 对齐 Python 的 * 展开
+    { name: "StreamingSE", type: "select", proxies: ["DIRECT", ...names] }, // 使用 ... 对齐 Python 的 * 展开
+  ];
+
+  // 4. 统一输出结构
+  return stringify({
+    proxies: servers,
+    "proxy-groups": groups
+  });
 }
