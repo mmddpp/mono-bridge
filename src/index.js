@@ -79,28 +79,6 @@ function validateEnv(env) {
   }
 }
 
-function parseRules(rulesSrc) {
-  if (!rulesSrc) return [];
-
-  // 1. 如果已经是数组，直接返回（最理想的状况）
-  if (Array.isArray(rulesSrc)) {
-    return rulesSrc;
-  }
-
-  // 2. 如果是未解析的 YAML 纯文本字符串，将其解析为数组
-  if (typeof rulesSrc === 'string' && rulesSrc.trim()) {
-    try {
-      const parsed = parse(rulesSrc);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch (e) {
-      console.error("parseRules 解析 YAML 字符串失败:", e);
-      return [];
-    }
-  }
-
-  return [];
-}
-
 function convert(services, env) {
   // 1. 过滤并解析服务器节点
   const servers = services
@@ -132,12 +110,13 @@ function convert(services, env) {
 
   // 4. 获取并解析 rules 环境变量
   const rawRules = env?.RULES || (typeof env !== 'undefined' ? env.RULES : '');
-  const rules = parseRules(rawRules);
 
   // 5. 统一输出结构
-  return stringify({ 
-    proxies: servers, 
+  const baseConfigYaml = stringify({
+    proxies: servers,
     "proxy-groups": groups,
-    rules: rules 
   });
+
+  // 自带 rules 头部，直接换行拼接
+  return `${baseConfigYaml}\n\n${rawRules}`;
 }
