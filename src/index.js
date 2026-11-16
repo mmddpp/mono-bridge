@@ -8,6 +8,7 @@ const MONOQUERY_CONCURRENCY = 6;
 const MIN_DNS_TTL_SECONDS = 60;
 const MAX_DNS_TTL_SECONDS = 3600;
 const MAX_CACHE_ENTRIES = 512;
+const MAX_HTTP_RESPONSE_BYTES = 8192;
 const IPV4_PATTERN = /^\d{1,3}(?:\.\d{1,3}){3}$/;
 
 // hostname -> { ip, expiresAt }，只存在于当前 isolate 内
@@ -205,6 +206,15 @@ async function queryDns(hostname, endpoint) {
   const url = new URL(endpoint);
   url.searchParams.set("dns", encodeDnsQuery(hostname));
 
+  // Cloudflare Workers 的 fetch 不能直接访问 IP 字面量，改用 TCP socket + TLS 手写 HTTP
+  const message = isIpLiteral(url.hostname)
+    ? await queryViaSocket(url)
+    : await queryViaFetch(url);
+
+  return parseDnsAnswer(message);
+}
+
+async function queryViaFetch(url) {
   const response = await fetch(url.toString(), {
     headers: { Accept: "application/dns-message" },
     signal: AbortSignal.timeout(MONOQUERY_TIMEOUT_MS),
@@ -213,7 +223,147 @@ async function queryDns(hostname, endpoint) {
     throw new Error(`HTTP ${response.status}`);
   }
 
-  return parseDnsAnswer(new Uint8Array(await response.arrayBuffer()));
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+async function queryViaSocket(url) {
+  const { connect } = await import("cloudflare:sockets");
+  const secure = url.protocol === "https:";
+  const hostname = url.hostname.replace(/^\[(.*)\]$/, "$1");
+  const port = url.port ? Number(url.port) : secure ? 443 : 80;
+  const socket = connect({ hostname, port }, { secureTransport: secure ? "on" : "off" });
+  const startedAt = Date.now();
+  const timer = setTimeout(() => socket.close().catch(() => {}), MONOQUERY_TIMEOUT_MS);
+
+  try {
+    await socket.opened;
+    const openedMs = Date.now() - startedAt;
+
+    const request =
+      `GET ${url.pathname}${url.search} HTTP/1.1\r\n` +
+      `Host: ${url.host}\r\n` +
+      `Accept: application/dns-message\r\n` +
+      `Connection: close\r\n\r\n`;
+
+    const writer = socket.writable.getWriter();
+    await writer.write(new TextEncoder().encode(request));
+
+    const reader = socket.readable.getReader();
+    const chunks = [];
+    let total = 0;
+    while (total < MAX_HTTP_RESPONSE_BYTES) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      chunks.push(value);
+      total += value.length;
+    }
+    await reader.cancel().catch(() => {});
+    await writer.close().catch(() => {});
+
+    const merged = concatBytes(chunks, total);
+    if (merged.length === 0) {
+      throw new Error(
+        `socket returned no data (open ${openedMs}ms, read ${Date.now() - startedAt}ms)`,
+      );
+    }
+
+    return readHttpBody(merged);
+  } finally {
+    clearTimeout(timer);
+    await socket.close().catch(() => {});
+  }
+}
+
+function readHttpBody(message) {
+  const headerEnd = findHeaderEnd(message);
+  if (headerEnd < 0) {
+    const preview = Array.from(message.subarray(0, 24), (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("");
+    throw new Error(`invalid HTTP response (${message.length} bytes: ${preview})`);
+  }
+
+  const lines = new TextDecoder().decode(message.subarray(0, headerEnd)).split("\r\n");
+  const status = Number((lines[0] || "").split(" ")[1]);
+  if (status !== 200) {
+    throw new Error(`HTTP ${status}`);
+  }
+
+  const headers = new Map();
+  for (const line of lines.slice(1)) {
+    const index = line.indexOf(":");
+    if (index > 0) {
+      headers.set(line.slice(0, index).trim().toLowerCase(), line.slice(index + 1).trim());
+    }
+  }
+
+  const body = message.subarray(headerEnd);
+  if ((headers.get("transfer-encoding") || "").toLowerCase().includes("chunked")) {
+    return decodeChunked(body);
+  }
+
+  const length = Number(headers.get("content-length"));
+  return Number.isFinite(length) && length >= 0 ? body.subarray(0, length) : body;
+}
+
+function findHeaderEnd(bytes) {
+  for (let i = 0; i + 3 < bytes.length; i += 1) {
+    if (bytes[i] === 13 && bytes[i + 1] === 10 && bytes[i + 2] === 13 && bytes[i + 3] === 10) {
+      return i + 4;
+    }
+  }
+
+  return -1;
+}
+
+function decodeChunked(body) {
+  const chunks = [];
+  const decoder = new TextDecoder();
+  let offset = 0;
+
+  while (offset < body.length) {
+    let lineEnd = -1;
+    for (let i = offset; i + 1 < body.length; i += 1) {
+      if (body[i] === 13 && body[i + 1] === 10) {
+        lineEnd = i;
+        break;
+      }
+    }
+    if (lineEnd < 0) {
+      break;
+    }
+
+    const size = parseInt(decoder.decode(body.subarray(offset, lineEnd)).split(";")[0], 16);
+    if (!Number.isFinite(size) || size <= 0) {
+      break;
+    }
+
+    const start = lineEnd + 2;
+    if (start + size > body.length) {
+      break;
+    }
+    chunks.push(body.subarray(start, start + size));
+    offset = start + size + 2;
+  }
+
+  return concatBytes(chunks, chunks.reduce((total, chunk) => total + chunk.length, 0));
+}
+
+function concatBytes(chunks, total) {
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  return merged;
+}
+
+function isIpLiteral(hostname) {
+  return IPV4_PATTERN.test(hostname) || hostname.startsWith("[");
 }
 
 // 构造 A 记录的 DNS 查询报文（QDCOUNT = 1），再按 base64url 编码

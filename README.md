@@ -15,6 +15,8 @@ npx wrangler secret put MONOQUERY_URL
 # e.g. https://47.57.20.32/monoquery
 ```
 
+The URL may use an IP literal. Cloudflare Workers' `fetch()` cannot target IP addresses, so for IP-literal endpoints the Worker falls back to a raw TCP + TLS socket and sends the HTTP request itself.
+
 `PATH` is required ans is used as the inbound authentication. It must be at least 44 alphanumeric characters: `A-Z`, `a-z`, or `0-9`.
 
 ```sh
